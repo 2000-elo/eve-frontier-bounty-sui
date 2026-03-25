@@ -8,8 +8,10 @@ const SUI_RPC = 'https://fullnode.testnet.sui.io:443'
 const SUI_GRAPHQL = 'https://graphql.testnet.sui.io/graphql'
 const WORLD_PKG = '0x28b497559d65ab320d9da4613bf2498d5946b2c0ae3597ccfda3072ce127448c'
 
-// ★ REPLACE THIS after deploying the contract with `sui client publish`
-const BOUNTY_PKG = '0xcba00d2124a22a21fb5fb3e9c4addc5542339f262a7e48bc9ade02a8c41e1100'
+// ★ REPLACE after deploying the contract
+const BOUNTY_PKG = '0x4f424f0c0c1dd1e9d989a6bf1752197f8385fe8ad67cf205aa7887468c7ae737'
+// ★ Registry object ID from publish output
+const REGISTRY_ID = '0x904e63ef7992a4cd9abe70bf38b761e72edd75df6975f28d35207f437838f59e'
 
 const BOUNTY_TYPE = `${BOUNTY_PKG}::bounty_board::Bounty`
 const CLOCK_ID = '0x0000000000000000000000000000000000000000000000000000000000000006'
@@ -81,7 +83,6 @@ function getSuiWallets() {
 
 // ── Sign & execute a Transaction via wallet-standard ─────────────
 async function execTx(wallet, account, tx) {
-  // Newer API — pass the Transaction object directly
   if (wallet.features['sui:signAndExecuteTransaction']) {
     return await wallet.features['sui:signAndExecuteTransaction'].signAndExecuteTransaction({
       transaction: tx,
@@ -89,7 +90,6 @@ async function execTx(wallet, account, tx) {
       chain: 'sui:testnet',
     })
   }
-  // Older API
   if (wallet.features['sui:signAndExecuteTransactionBlock']) {
     return await wallet.features['sui:signAndExecuteTransactionBlock'].signAndExecuteTransactionBlock({
       transactionBlock: tx,
@@ -109,6 +109,11 @@ function App() {
   const [wallets, setWallets] = useState([])
   const [showWalletPicker, setShowWalletPicker] = useState(false)
 
+  // Character registration
+  const [registeredName, setRegisteredName] = useState('')
+  const [registerInput, setRegisterInput] = useState('')
+  const [registerMsg, setRegisterMsg] = useState('')
+
   // Kill data (from EVE world)
   const [kills, setKills] = useState([])
   const [charMap, setCharMap] = useState({})
@@ -127,7 +132,7 @@ function App() {
   const [expiry, setExpiry] = useState(7)
   const [formMsg, setFormMsg] = useState('')
 
-  // Claimed history (localStorage, since claimed objects stay on chain but with 0 balance)
+  // Claimed history
   useEffect(() => {
     try {
       const stored = JSON.parse(localStorage.getItem('eve_bounty_claimed'))
@@ -157,6 +162,40 @@ function App() {
     } catch { return '0.0000' }
   }
 
+  // ── Check if wallet is registered ─────────────────────────────
+  async function checkRegistration(addr) {
+    if (REGISTRY_ID === 'YOUR_REGISTRY_ID_HERE') return
+    try {
+      const data = await gql(`{
+        object(address: "${REGISTRY_ID}") {
+          asMoveObject { contents { json } }
+        }
+      }`)
+      if (!data?.object) return
+      // The registry stores a Table, we need to check via dynamic field
+      const dfData = await gql(`{
+        owner(address: "${REGISTRY_ID}") {
+          dynamicFields(first: 100) {
+            nodes {
+              name { json }
+              value { ... on MoveValue { json } }
+            }
+          }
+        }
+      }`)
+      if (!dfData?.owner?.dynamicFields?.nodes) return
+      for (const df of dfData.owner.dynamicFields.nodes) {
+        if (df.name?.json === addr) {
+          setRegisteredName(df.value?.json || '')
+          setPosterName(df.value?.json || '')
+          return
+        }
+      }
+    } catch (e) {
+      console.error('Registration check failed:', e)
+    }
+  }
+
   // ── Connect wallet ───────────────────────────────────────────
   async function connectWallet(w) {
     try {
@@ -168,6 +207,7 @@ function App() {
       setShowWalletPicker(false)
       const bal = await fetchBalance(acc.address)
       setBalance(bal)
+      checkRegistration(acc.address)
     } catch (e) {
       console.error('Connect failed:', e)
       setFormMsg('Failed to connect wallet')
@@ -178,6 +218,38 @@ function App() {
     setWallet(null)
     setAccount(null)
     setBalance('0.00')
+    setRegisteredName('')
+  }
+
+  // ── Register character (on-chain) ─────────────────────────────
+  async function registerCharacter() {
+    if (!account) { setRegisterMsg('Connect your wallet first'); return }
+    if (!registerInput.trim()) { setRegisterMsg('Enter your EVE character name'); return }
+
+    try {
+      setRegisterMsg('Registering character...')
+      const tx = new Transaction()
+      tx.moveCall({
+        target: `${BOUNTY_PKG}::bounty_board::register_character`,
+        arguments: [
+          tx.object(REGISTRY_ID),
+          tx.pure.string(registerInput.trim()),
+        ],
+      })
+
+      const result = await execTx(wallet, account, tx)
+      const digest = result.digest || result.txDigest || ''
+      setRegisteredName(registerInput.trim())
+      setPosterName(registerInput.trim())
+      setRegisterMsg('Registered! TX: ' + digest.slice(0, 12) + '...')
+      setRegisterInput('')
+    } catch (e) {
+      if (e.message?.includes('rejected') || e.message?.includes('Rejected')) {
+        setRegisterMsg('Transaction rejected.')
+      } else {
+        setRegisterMsg('Error: ' + e.message)
+      }
+    }
   }
 
   // ── Load bounties from chain ─────────────────────────────────
@@ -200,16 +272,15 @@ function App() {
           expiry: new Date(parseInt(b.expires_at_ms)).toISOString(),
           claimed: b.claimed,
           claimedBy: b.claimed_by,
+          killerName: b.killer_name,
         }
       })
 
-      // Split into active and claimed
       const active = parsed.filter(b => !b.claimed)
       const onChainClaimed = parsed.filter(b => b.claimed && b.claimedBy !== '0x0000000000000000000000000000000000000000000000000000000000000000')
 
       setBounties(active)
 
-      // Merge on-chain claimed with localStorage claimed history
       if (onChainClaimed.length > 0) {
         setClaimedBounties(prev => {
           const ids = new Set(prev.map(c => c.id))
@@ -273,8 +344,7 @@ function App() {
     loadData()
   }, [])
 
-  // ── Match kills to bounties (find claimable) ─────────────────
-  // Returns a map: bountyId -> kill (the matching kill)
+  // ── Match kills to bounties ────────────────────────────────────
   const claimableMap = {}
   for (const b of bounties) {
     for (const k of kills) {
@@ -295,7 +365,7 @@ function App() {
     if (!amt || amt < 0.001) { setFormMsg('Minimum bounty: 0.001 SUI'); return }
 
     if (BOUNTY_PKG === 'YOUR_PACKAGE_ID_HERE') {
-      setFormMsg('Contract not deployed yet! See contracts/bounty_board/README.')
+      setFormMsg('Contract not deployed yet!')
       return
     }
 
@@ -326,7 +396,6 @@ function App() {
       setAmount('')
       setReason('')
 
-      // Refresh bounties and balance
       setTimeout(loadBounties, 2000)
       const bal = await fetchBalance(account.address)
       setBalance(bal)
@@ -340,27 +409,30 @@ function App() {
   }
 
   // ── Claim bounty (on-chain) ──────────────────────────────────
-  async function claimBounty(bounty) {
+  async function claimBounty(bounty, killerName) {
     if (!account) { setFormMsg('Connect your wallet to claim'); return }
+    if (!registeredName) { setFormMsg('Register your EVE character first'); return }
 
     try {
       setFormMsg('Claiming bounty...')
       const tx = new Transaction()
       tx.moveCall({
         target: `${BOUNTY_PKG}::bounty_board::claim_bounty`,
-        arguments: [tx.object(bounty.id)],
+        arguments: [
+          tx.object(bounty.id),
+          tx.object(REGISTRY_ID),
+          tx.pure.string(killerName),
+        ],
       })
 
       const result = await execTx(wallet, account, tx)
       const digest = result.digest || result.txDigest || ''
 
-      // Save to claimed history
-      const kill = claimableMap[bounty.id]
       const claimRecord = {
         ...bounty,
         claimed: true,
         claimedBy: account.address,
-        claimedByName: kill?.killer || 'Unknown',
+        claimedByName: killerName,
         claimedAt: new Date().toISOString(),
         txDigest: digest,
       }
@@ -370,13 +442,16 @@ function App() {
 
       setFormMsg('Bounty claimed! +' + bounty.amount + ' SUI. TX: ' + digest.slice(0, 12) + '...')
 
-      // Refresh
       setTimeout(loadBounties, 2000)
       const bal = await fetchBalance(account.address)
       setBalance(bal)
     } catch (e) {
       if (e.message?.includes('rejected') || e.message?.includes('Rejected')) {
         setFormMsg('Transaction rejected.')
+      } else if (e.message?.includes('5')) {
+        setFormMsg('You must register your EVE character first.')
+      } else if (e.message?.includes('6')) {
+        setFormMsg('Your registered character does not match the killer. Only the actual killer can claim.')
       } else {
         setFormMsg('Claim error: ' + e.message)
       }
@@ -441,11 +516,9 @@ function App() {
       </div>
 
       <div className="wrap">
-        {/* Contract status banner */}
         {!contractReady && (
           <div className="contract-banner">
-            Contract not deployed yet. Set <code>BOUNTY_PKG</code> in App.jsx after running <code>sui client publish</code>.
-            Kill feed and leaderboard still work without the contract.
+            Contract not deployed yet. Set <code>BOUNTY_PKG</code> and <code>REGISTRY_ID</code> in App.jsx after running <code>sui client publish</code>.
           </div>
         )}
 
@@ -478,10 +551,23 @@ function App() {
               <span className="wallet-addr">{account.address.slice(0, 8)}...{account.address.slice(-6)}</span>
               <span className="wallet-bal">{balance} SUI</span>
               <span className="chain-badge">SUI TESTNET</span>
+              {registeredName && <span className="chain-badge" style={{background: '#00ff8820', color: '#00ff88'}}>{registeredName}</span>}
               <button className="btn btn-sm" onClick={disconnect}>DISCONNECT</button>
             </div>
           )}
         </div>
+
+        {/* Character Registration */}
+        {account && !registeredName && contractReady && (
+          <div className="register-bar">
+            <div className="register-title">Register your EVE Frontier character to claim bounties</div>
+            <div className="register-form">
+              <input value={registerInput} onChange={e => setRegisterInput(e.target.value)} placeholder="Your EVE Frontier character name..." />
+              <button className="btn btn-register" onClick={registerCharacter}>REGISTER</button>
+            </div>
+            {registerMsg && <div className="form-msg">{registerMsg}</div>}
+          </div>
+        )}
 
         {/* Bounty Pool */}
         <div className="bounty-total">
@@ -528,8 +614,8 @@ function App() {
               <div className="how-it-works">
                 <b>How it works:</b> Your SUI is locked in a smart contract on Sui Testnet.
                 When the target is killed on-chain (EVE Frontier), the hunter can claim
-                the bounty and receive the SUI directly to their wallet. If nobody claims
-                before expiry, you can cancel and get your SUI back.
+                the bounty — but only if their registered character matches the killer.
+                If nobody claims before expiry, you can cancel and get your SUI back.
               </div>
             </div>
           </div>
@@ -547,6 +633,7 @@ function App() {
                 const isExpired = daysLeft === 0
                 const matchedKill = claimableMap[b.id]
                 const isPoster = account && b.poster === account.address
+                const isKiller = matchedKill && registeredName && matchedKill.killer.toLowerCase() === registeredName.toLowerCase()
                 return (
                   <div key={b.id} className={`bounty-card ${matchedKill ? 'bounty-claimable' : ''}`}>
                     <div className="bounty-header">
@@ -557,15 +644,21 @@ function App() {
                     </div>
                     {b.reason && <div className="bounty-reason">"{b.reason}"</div>}
 
-                    {/* Claim button when kill matches */}
+                    {/* Kill detected */}
                     {matchedKill && (
                       <div className="claim-section">
                         <div className="claim-match">
                           Kill detected: <b className="orange">{matchedKill.killer}</b> destroyed <b className="red">{matchedKill.victim}</b>
                         </div>
-                        <button className="btn btn-claim" onClick={() => claimBounty(b)}>
-                          CLAIM {b.amount} SUI
-                        </button>
+                        {isKiller ? (
+                          <button className="btn btn-claim" onClick={() => claimBounty(b, matchedKill.killer)}>
+                            CLAIM {b.amount} SUI
+                          </button>
+                        ) : (
+                          <div className="dim" style={{padding: '6px 0'}}>
+                            Only <b className="orange">{matchedKill.killer}</b> can claim this bounty
+                          </div>
+                        )}
                       </div>
                     )}
 

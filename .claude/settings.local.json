@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(node -e \"const p = require\\(''''C:/Users/amazm/Downloads/eve-bounty-sui/node_modules/@mysten/sui/package.json''''\\); console.log\\(JSON.stringify\\(p.exports, null, 2\\)\\)\")",
+      "Bash(node -e \":*)",
+      "Bash(node --input-type=module -e \":*)",
+      "Bash(where gh:*)"
+    ]
+  }
+}
